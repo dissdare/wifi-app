@@ -24,3 +24,10 @@ const List<CommandDef> presetCommands = [
   ),
   CommandDef('中断当前操作', '', interrupt: true),
 ];
+
+/// 中断当前操作的预设（本地/远程共用）。
+const CommandDef interruptCommand =
+    CommandDef('中断当前操作', '', interrupt: true);
+
+/// 远程连接（frp）下的预设：只保留「中断当前操作」，去掉 ec20 相关指令。
+const List<CommandDef> remotePresetCommands = [interruptCommand];

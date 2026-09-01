@@ -14,7 +14,16 @@ final _ansiEscape = RegExp(
 
 class ControlScreen extends StatefulWidget {
   final SSHService service;
-  const ControlScreen({super.key, required this.service});
+
+  /// 控制页顶部展示的预设指令列表；默认用全部预设（含 ec20）。
+  /// 远程连接时传入 [remotePresetCommands]，去掉 ec20 相关按钮。
+  final List<CommandDef> presets;
+
+  const ControlScreen({
+    super.key,
+    required this.service,
+    this.presets = presetCommands,
+  });
 
   @override
   State<ControlScreen> createState() => _ControlScreenState();
@@ -175,7 +184,7 @@ class _ControlScreenState extends State<ControlScreen> {
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final cmd in presetCommands)
+              for (final cmd in widget.presets)
                 ActionChip(
                   label: Text(cmd.label),
                   avatar: cmd.interrupt

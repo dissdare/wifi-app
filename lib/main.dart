@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'auto_login_screen.dart';
+import 'home_screen.dart';
 
 void main() {
   runApp(const BoardControlApp());
@@ -21,7 +21,7 @@ class BoardControlApp extends StatelessWidget {
         colorSchemeSeed: Colors.teal,
         brightness: Brightness.light,
       ),
-      home: AutoLoginScreen(autoConnect: autoConnect),
+      home: HomeScreen(autoConnect: autoConnect),
     );
   }
 }
