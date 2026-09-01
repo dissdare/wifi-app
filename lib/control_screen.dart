@@ -3,14 +3,10 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:xterm/xterm.dart';
 
 import 'commands.dart';
 import 'ssh_service.dart';
-
-/// ANSI 转义序列（颜色/控制码），终端输出中过滤掉，只保留纯文本。
-final _ansiEscape = RegExp(
-  r'\x1B(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_])',
-);
 
 class ControlScreen extends StatefulWidget {
   final SSHService service;
@@ -30,10 +26,10 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  SSHSession? _shell;
-  final _inputCtrl = TextEditingController();
-  final _scroll = ScrollController();
-  String _output = '';
+  /// 真正的终端模拟器：解析 ANSI 转义、处理光标、回显、退格、tab 补全等。
+  final terminal = Terminal(maxLines: 10000);
+
+  SSHSession? _session;
   bool _connected = true;
 
   @override
@@ -42,18 +38,52 @@ class _ControlScreenState extends State<ControlScreen> {
     _initTerminal();
   }
 
-  /// 打开交互式 shell 并监听输出 / 连接断开。
+  /// 打开交互式 shell，并把终端与 shell 双向绑定。
   Future<void> _initTerminal() async {
     try {
-      final shell = await widget.service.openShell();
+      final client = widget.service.client;
+      if (client == null) {
+        throw StateError('尚未连接');
+      }
+
+      final session = await client.shell(
+        pty: SSHPtyConfig(
+          width: terminal.viewWidth,
+          height: terminal.viewHeight,
+        ),
+      );
       if (!mounted) {
-        shell.close();
+        session.close();
         return;
       }
-      _shell = shell;
-      // 用 stateful 的 utf8.decoder 跨 chunk 正确解码中文等多字节字符。
-      utf8.decoder.bind(shell.stdout).listen(_onText);
-      utf8.decoder.bind(shell.stderr).listen(_onText);
+      _session = session;
+
+      // 终端尺寸变化 → 通知远端 PTY 调整行列数。
+      terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+        session.resizeTerminal(width, height, pixelWidth, pixelHeight);
+      };
+
+      // 用户在终端敲键盘 → 原始字节写回 shell。
+      // 软键盘的回车键产生的是 \n（LF），但交互式 shell 需要 \r（CR），
+      // 这里统一转换，否则命令不会执行。
+      terminal.onOutput = (data) {
+        // 诊断：记录含控制字符的输入，便于定位软键盘回车路径。
+        final codes = data.codeUnits
+            .map((c) => c < 32 ? '\\x${c.toRadixString(16)}' : String.fromCharCode(c))
+            .join('');
+        debugPrint('[board_control] onOutput: "$codes"');
+        session.write(utf8.encode(data.replaceAll('\n', '\r')));
+      };
+
+      // shell 的 stdout / stderr → 喂给终端渲染。
+      session.stdout
+          .cast<List<int>>()
+          .transform(const Utf8Decoder())
+          .listen(terminal.write);
+      session.stderr
+          .cast<List<int>>()
+          .transform(const Utf8Decoder())
+          .listen(terminal.write);
 
       // 监听连接断开（主板断电 / WiFi 断开）→ 状态变红色。
       widget.service.addDisconnectListener(_onDisconnected);
@@ -61,8 +91,8 @@ class _ControlScreenState extends State<ControlScreen> {
       if (!mounted) return;
       setState(() {
         _connected = false;
-        _output = '无法打开终端：$e\n';
       });
+      terminal.write('\r\n无法打开终端：$e\r\n');
     }
   }
 
@@ -70,46 +100,21 @@ class _ControlScreenState extends State<ControlScreen> {
     if (mounted) setState(() => _connected = false);
   }
 
-  void _onText(String text) {
-    // 去掉 ANSI 转义序列（颜色码等），只保留纯文本。
-    text = text.replaceAll(_ansiEscape, '');
-    // 规范化换行，避免 CR（\r）导致的显示异常。
-    text = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-    if (!mounted) return;
-    setState(() => _output += text);
-    _scrollToBottom();
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
-    });
-  }
-
-  /// 发送用户在终端输入的命令。
-  void _sendCommand(String raw) {
-    if (raw.isEmpty) return;
-    _shell?.write(utf8.encode('$raw\n'));
-    _inputCtrl.clear();
-  }
-
   /// 执行预设指令：普通命令写入 shell，中断指令发送 Ctrl+C。
   void _sendPreset(CommandDef cmd) {
+    final session = _session;
+    if (session == null) return;
     if (cmd.interrupt) {
-      _shell?.write(Uint8List.fromList(const [0x03]));
+      session.write(Uint8List.fromList(const [0x03]));
     } else {
-      _shell?.write(utf8.encode('${cmd.command}\n'));
+      session.write(utf8.encode('${cmd.command}\n'));
     }
   }
 
   @override
   void dispose() {
     widget.service.removeDisconnectListener(_onDisconnected);
-    _shell?.close();
-    _inputCtrl.dispose();
-    _scroll.dispose();
+    _session?.close();
     super.dispose();
   }
 
@@ -133,7 +138,16 @@ class _ControlScreenState extends State<ControlScreen> {
         children: [
           _buildPresetPanel(),
           const Divider(height: 1),
-          Expanded(child: _buildTerminal()),
+          Expanded(
+            child: TerminalView(
+              terminal,
+              autofocus: true,
+              // 默认是 emailAddress 键盘，回车键不产生换行；改成 text。
+              keyboardType: TextInputType.text,
+              padding: const EdgeInsets.all(8),
+              textStyle: const TerminalStyle(fontSize: 14, height: 1.3),
+            ),
+          ),
         ],
       ),
     );
@@ -172,6 +186,7 @@ class _ControlScreenState extends State<ControlScreen> {
     );
   }
 
+  /// 顶部预设指令面板（保持原来的 ActionChip 样式）。
   Widget _buildPresetPanel() {
     return Padding(
       padding: const EdgeInsets.all(12),
@@ -193,73 +208,6 @@ class _ControlScreenState extends State<ControlScreen> {
                   onPressed: () => _sendPreset(cmd),
                 ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 终端区域：实时输出 + 底部输入框，像 SSH 登录后的终端。
-  Widget _buildTerminal() {
-    return Container(
-      width: double.infinity,
-      color: const Color(0xFF121212),
-      child: Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              controller: _scroll,
-              padding: const EdgeInsets.all(12),
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: SelectableText(
-                  _output.isEmpty ? '正在连接终端…' : _output,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          _buildTerminalInput(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTerminalInput() {
-    return Container(
-      color: const Color(0xFF1E1E1E),
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-      child: Row(
-        children: [
-          const Text(
-            r'$ ',
-            style: TextStyle(
-              color: Colors.greenAccent,
-              fontFamily: 'monospace',
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Expanded(
-            child: TextField(
-              controller: _inputCtrl,
-              style: const TextStyle(
-                color: Colors.white,
-                fontFamily: 'monospace',
-                fontSize: 14,
-              ),
-              decoration: const InputDecoration(
-                hintText: '输入命令，回车执行',
-                border: InputBorder.none,
-                isDense: true,
-                hintStyle: TextStyle(color: Colors.white38),
-              ),
-              onSubmitted: _sendCommand,
-            ),
           ),
         ],
       ),

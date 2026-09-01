@@ -62,20 +62,19 @@ class _RemoteConfigScreenState extends State<RemoteConfigScreen> {
       return;
     }
 
-    // SSH 用户名携带设备序列号，frp 服务器据此路由到对应设备。
-    // 若服务器要求「序列号@用户名」，把下面两段顺序对调即可。
-    final sshUsername = '$user@$serial';
-
     setState(() => _connecting = true);
     try {
+      // frp tcpmux+httpconnect：序列号作为路由键（HTTP CONNECT 的 Host），
+      // 用户名/密码是目标设备的 SSH 凭据，两者不拼接。
       await _service.connect(
         host: host,
         port: port,
-        username: sshUsername,
+        username: user,
         password: pass,
+        frpSerial: serial,
       );
       if (!mounted) return;
-      debugPrint('[board_control] frp 连接成功: $host:$port ($sshUsername)');
+      debugPrint('[board_control] frp 连接成功: $host:$port (设备 $serial)');
       Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ControlScreen(

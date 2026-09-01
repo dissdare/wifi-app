@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 
@@ -22,17 +24,141 @@ class _Cancelled implements Exception {
   String toString() => '连接已取消';
 }
 
+/// 定位 HTTP 响应头结束标记 `\r\n\r\n`，返回其后第一个字节的索引；
+/// 未找到返回 -1。
+int _findHeaderEnd(List<int> data) {
+  for (var i = 0; i + 3 < data.length; i++) {
+    if (data[i] == 13 &&
+        data[i + 1] == 10 &&
+        data[i + 2] == 13 &&
+        data[i + 3] == 10) {
+      return i + 4;
+    }
+  }
+  return -1;
+}
+
+/// 包装一个已经完成 frp HTTP CONNECT 握手的原生 [Socket]，
+/// 暴露成 dartssh2 需要的 [SSHSocket]，让 SSH 直接跑在这条隧道上。
+class _FrpSocket implements SSHSocket {
+  final Socket _socket;
+  final Stream<Uint8List> _stream;
+
+  _FrpSocket(this._socket, this._stream);
+
+  @override
+  Stream<Uint8List> get stream => _stream;
+
+  @override
+  StreamSink<List<int>> get sink => _socket;
+
+  @override
+  Future<void> close() async {
+    await _socket.close();
+  }
+
+  @override
+  Future<void> get done => _socket.done;
+
+  @override
+  void destroy() {
+    _socket.destroy();
+  }
+
+  @override
+  String toString() {
+    final address = '${_socket.remoteAddress.host}:${_socket.remotePort}';
+    return '_FrpSocket($address)';
+  }
+}
+
+/// 通过 frp 服务器的 tcpmux + httpconnect 复用协议建立到指定设备的隧道，
+/// 返回包装好的 [SSHSocket]。
+///
+/// 流程：TCP 连上 `host:port` → 发送 HTTP CONNECT 请求，Host 头 = [serial]
+/// （即 frpc.toml 里的 customDomains）→ 服务器回 `HTTP/1.1 200` → 隧道建立，
+/// 之后的字节流就是目标设备的 SSH。序列号是 frp 的路由键，不参与 SSH 认证。
+Future<SSHSocket> frpConnect(
+  String host,
+  int port,
+  String serial, {
+  Duration? timeout,
+}) async {
+  final socket = await Socket.connect(host, port, timeout: timeout);
+
+  final controller = StreamController<Uint8List>();
+  final bytes = BytesBuilder();
+  var headerDone = false;
+  final completer = Completer<void>();
+
+  socket.listen(
+    (chunk) {
+      if (headerDone) {
+        controller.add(chunk);
+        return;
+      }
+      bytes.add(chunk);
+      final data = bytes.toBytes();
+      final idx = _findHeaderEnd(data);
+      if (idx < 0) return; // 响应头还没收完整
+      headerDone = true;
+
+      final header = latin1.decode(data.sublist(0, idx));
+      final rest = data.sublist(idx);
+      if (header.startsWith('HTTP/1.1 200')) {
+        // 响应头之后的字节（如 SSH banner）缓存进 stream，供 SSHClient 读取。
+        if (rest.isNotEmpty) controller.add(rest);
+        if (!completer.isCompleted) completer.complete();
+      } else {
+        final firstLine = header.split('\r\n').first;
+        if (!completer.isCompleted) {
+          completer.completeError(StateError('frp 握手失败: $firstLine'));
+        }
+        socket.destroy();
+      }
+    },
+    onError: (Object e) {
+      if (!headerDone && !completer.isCompleted) {
+        completer.completeError(e);
+      }
+      controller.addError(e);
+    },
+    onDone: () {
+      if (!headerDone && !completer.isCompleted) {
+        completer.completeError(StateError('frp 连接被关闭'));
+      }
+      controller.close();
+    },
+  );
+
+  socket.add(utf8.encode('CONNECT $serial HTTP/1.1\r\nHost: $serial\r\n\r\n'));
+
+  await completer.future.timeout(
+    timeout ?? const Duration(seconds: 10),
+    onTimeout: () {
+      socket.destroy();
+      throw TimeoutException('frp 握手超时');
+    },
+  );
+
+  return _FrpSocket(socket, controller.stream);
+}
+
 /// 一次可取消的 SSH 连接尝试。
 ///
 /// [start] 成功返回已认证的 [SSHClient]，失败抛出异常。
 /// [cancel] 可随时调用以中断尝试：销毁底层 socket，让进行中的
 /// 连接/认证立即失败。若仍处于 TCP 建连阶段（拿不到 socket），
 /// 则在建连返回后立即放弃，最多等待 [timeout]。
+///
+/// 当 [frpSerial] 非空时，走 frp tcpmux+httpconnect 隧道（远程连接）；
+/// 否则直接 TCP 连到 [host]:[port]（本地 WiFi 直连）。
 class SshConnectionAttempt {
   final String host;
   final int port;
   final String username;
   final String password;
+  final String? frpSerial;
   final Duration timeout;
 
   SSHSocket? _socket;
@@ -44,6 +170,7 @@ class SshConnectionAttempt {
     this.port = 22,
     required this.username,
     required this.password,
+    this.frpSerial,
     this.timeout = const Duration(seconds: 8),
   });
 
@@ -53,7 +180,11 @@ class SshConnectionAttempt {
     try {
       if (_cancelled) throw _Cancelled();
 
-      socket = await SSHSocket.connect(host, port, timeout: timeout);
+      if (frpSerial != null && frpSerial!.isNotEmpty) {
+        socket = await frpConnect(host, port, frpSerial!, timeout: timeout);
+      } else {
+        socket = await SSHSocket.connect(host, port, timeout: timeout);
+      }
       _socket = socket;
       if (_cancelled) throw _Cancelled();
 
@@ -148,6 +279,9 @@ class SSHService {
   /// 当前连接的 IP 地址（用于界面显示）。
   String? get host => _host;
 
+  /// 底层已认证的 SSH 客户端（供终端组件直接开 shell / 调整尺寸）。
+  SSHClient? get client => _client;
+
   /// 注册连接断开监听（意外断开时回调，用于 UI 更新状态）。
   void addDisconnectListener(void Function() listener) {
     _disconnectListeners.add(listener);
@@ -178,17 +312,20 @@ class SSHService {
   /// 建立 SSH 连接并完成认证（手动连接）。
   ///
   /// 认证失败或网络不通会抛出异常，由调用方处理并提示用户。
+  /// [frpSerial] 非空时走 frp 远程隧道，序列号作为 frp 路由键。
   Future<void> connect({
     required String host,
     required int port,
     required String username,
     required String password,
+    String? frpSerial,
   }) async {
     final attempt = SshConnectionAttempt(
       host: host,
       port: port,
       username: username,
       password: password,
+      frpSerial: frpSerial,
       timeout: const Duration(seconds: 10),
     );
     _client = await attempt.start();
