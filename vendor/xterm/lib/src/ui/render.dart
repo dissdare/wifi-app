@@ -222,10 +222,15 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       _terminal.buffer.lines.length * _painter.cellSize.height;
 
   /// The distance from the top of the terminal to the top of the viewport.
-  // double get _scrollOffset => _offset.pixels;
+  ///
+  /// Aligned to a whole number of cell heights. cellHeight is an integer in
+  /// our configuration (18.0), so this makes the scroll offset an integer and
+  /// keeps every line painted at an exact pixel row. Without this, keyboard
+  /// show/hide animations drive the scroll offset through sub-pixel values,
+  /// and the truncation in _paint makes the whole viewport jump by 1px each
+  /// time the fractional part crosses zero — visible as "font jumping".
   double get _scrollOffset {
-    // return _offset.pixels ~/ _painter.cellSize.height * _painter.cellSize.height;
-    return _offset.pixels;
+    return _offset.pixels ~/ _painter.cellSize.height * _painter.cellSize.height;
   }
 
   /// The height of a terminal line in pixels. This includes the line spacing.
@@ -373,7 +378,14 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   double get _maxScrollExtent {
-    return max(_terminalHeight - _viewportHeight, 0.0);
+    // Align the viewport height down to a whole number of rows first, then
+    // subtract from the (row-aligned) terminal height. This keeps the scroll
+    // offset an exact multiple of cellHeight when sticking to bottom, so the
+    // last (cursor) line is painted fully instead of being clipped by the
+    // sub-row remainder of the physical viewport height.
+    final alignedViewportHeight =
+        _viewportHeight ~/ _painter.cellSize.height * _painter.cellSize.height;
+    return max(_terminalHeight - alignedViewportHeight, 0.0);
   }
 
   double get _lineOffset {

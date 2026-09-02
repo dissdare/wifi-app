@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'commands.dart';
 import 'control_screen.dart';
+import 'network_binding.dart';
 import 'ssh_service.dart';
 
 /// 远程连接（frp 隧道）配置页。
@@ -25,6 +26,20 @@ class _RemoteConfigScreenState extends State<RemoteConfigScreen> {
 
   final _service = SSHService();
   bool _connecting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLastSerial();
+  }
+
+  /// 回填上一次成功连接的序列号，方便快速重连同一台设备。
+  Future<void> _loadLastSerial() async {
+    final serial = await getLastSerial();
+    if (serial != null && mounted && serial.isNotEmpty) {
+      _serialCtrl.text = serial;
+    }
+  }
 
   @override
   void dispose() {
@@ -64,6 +79,11 @@ class _RemoteConfigScreenState extends State<RemoteConfigScreen> {
 
     setState(() => _connecting = true);
     try {
+      // 远程连接前先解除进程网络绑定。WiFi 直连时进程被持久绑定到无外网的
+      // 主板热点，若不解除，切换到能上网的网络后 socket 仍走已失效的热点，
+      // 导致 frp 连不出去（重开 App 才恢复）。解绑后走系统默认网络。
+      await unbindProcessNetwork();
+
       // frp tcpmux+httpconnect：序列号作为路由键（HTTP CONNECT 的 Host），
       // 用户名/密码是目标设备的 SSH 凭据，两者不拼接。
       await _service.connect(
@@ -74,6 +94,8 @@ class _RemoteConfigScreenState extends State<RemoteConfigScreen> {
         frpSerial: serial,
       );
       if (!mounted) return;
+      // 连接成功后持久化序列号，下次打开自动回填。
+      await saveLastSerial(serial);
       debugPrint('[board_control] frp 连接成功: $host:$port (设备 $serial)');
       Navigator.of(context).push(
         MaterialPageRoute(

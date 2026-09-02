@@ -271,6 +271,9 @@ class SSHService {
   SSHClient? _client;
   String? _host;
   Timer? _keepAliveTimer;
+  /// ping 连续失败累计的起始时间；null 表示当前无连续失败。
+  /// 从首次失败起累计满 5 秒仍无一次成功，才判定真正断开。
+  DateTime? _failSince;
   bool _probing = false;
   final List<void Function()> _disconnectListeners = [];
 
@@ -346,10 +349,15 @@ class SSHService {
 
   /// 定期发送带超时的 keepalive，检测静默断开（如 WiFi 断开，
   /// TCP 收不到 FIN/RST，socket.done 不会触发）。
+  ///
+  /// 稳定性策略：每 2 秒 ping 一次（超时 2 秒）。单次失败只记录失败起点，
+  /// 不立即断开；从首次失败起累计满 5 秒仍无一次成功，才判定真正断开。
+  /// 期间任一 ping 成功即清零失败累计，说明只是短暂波动。
   void _startKeepAlive() {
     _keepAliveTimer?.cancel();
+    _failSince = null;
     _keepAliveTimer = Timer.periodic(
-      const Duration(seconds: 3),
+      const Duration(seconds: 2),
       (_) => _probe(),
     );
   }
@@ -360,18 +368,28 @@ class SSHService {
     try {
       final client = _client;
       if (client == null || client.isClosed) {
-        _markDisconnected();
+        _onPingFailed();
         return;
       }
       try {
-        // ping 发送 keepalive 并等待服务器回复；断开时回复不会来，
-        // 用超时兜底判定连接已死。
-        await client.ping().timeout(const Duration(seconds: 4));
+        // ping 发送 keepalive 并等待服务器回复；断开时回复不会来。
+        await client.ping().timeout(const Duration(seconds: 2));
+        // 成功：清零失败累计（若在波动后恢复）。
+        _failSince = null;
       } catch (_) {
-        _markDisconnected();
+        _onPingFailed();
       }
     } finally {
       _probing = false;
+    }
+  }
+
+  /// ping 失败：记录首次失败时间；累计满 5 秒仍失败则真正断开。
+  void _onPingFailed() {
+    final now = DateTime.now();
+    _failSince ??= now;
+    if (now.difference(_failSince!) >= const Duration(seconds: 5)) {
+      _markDisconnected();
     }
   }
 
@@ -380,6 +398,7 @@ class SSHService {
     if (_client == null && _keepAliveTimer == null) return;
     _keepAliveTimer?.cancel();
     _keepAliveTimer = null;
+    _failSince = null;
     final client = _client;
     _client = null;
     _host = null;

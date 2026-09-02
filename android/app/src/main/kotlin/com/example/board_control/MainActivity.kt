@@ -8,10 +8,12 @@ import android.net.NetworkRequest
 import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val channelName = "board_control/network"
+    private val prefsName = "board_control_prefs"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -19,6 +21,9 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "bindToWifi" -> bindToWifi(result)
+                    "unbindProcessNetwork" -> unbindProcessNetwork(result)
+                    "saveSerial" -> saveSerial(call, result)
+                    "getSerial" -> getSerial(result)
                     else -> result.notImplemented()
                 }
             }
@@ -71,5 +76,38 @@ class MainActivity : FlutterActivity() {
         }
         // Android 6.0 以下不支持进程级绑定，直接走默认网络。
         result.success(true)
+    }
+
+    /**
+     * 解除进程网络绑定，让 socket 回到系统默认网络（蜂窝 / 其它能上网的 WiFi）。
+     *
+     * WiFi 直连会把进程持久绑定到无外网的主板热点；之后切换到能上网的网络时，
+     * 进程仍绑在已失效的网络上，导致远程 frp 连接失败。远程连接前调用本方法解绑。
+     */
+    private fun unbindProcessNetwork(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.bindProcessToNetwork(null)
+        }
+        result.success(true)
+    }
+
+    private fun saveSerial(call: MethodCall, result: MethodChannel.Result) {
+        val serial = call.argument<String>("serial")
+        if (serial.isNullOrBlank()) {
+            result.success(false)
+            return
+        }
+        getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .edit()
+            .putString("last_frp_serial", serial)
+            .apply()
+        result.success(true)
+    }
+
+    private fun getSerial(result: MethodChannel.Result) {
+        val serial = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .getString("last_frp_serial", null)
+        result.success(serial)
     }
 }
