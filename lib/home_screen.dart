@@ -69,7 +69,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('主板控制台')),
+      appBar: AppBar(
+        title: const Text('主板控制台'),
+        actions: [
+          // 右上角「权限」按钮：跳转系统无障碍设置页，手动开启后台保活服务。
+          TextButton(
+            onPressed: () => openAccessibilitySettings(),
+            child: const Text('权限'),
+          ),
+        ],
+      ),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 360),
