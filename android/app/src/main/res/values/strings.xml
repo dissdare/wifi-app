@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">开启后，切换到其他应用时本应用会在后台保持运行，已建立的连接不会断开。不读取任何屏幕内容。</string>
+</resources>

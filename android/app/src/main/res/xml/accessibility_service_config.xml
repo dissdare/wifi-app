@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只监听最轻量的窗口状态变化，且不读取窗口内容（canRetrieveWindowContent=false），
+     对系统干预最小。服务本体是空实现，用途仅是后台保活。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault" />

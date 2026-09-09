@@ -120,6 +120,17 @@
 
 底层 socket 正常关闭（FIN/RST）仍通过 `client.done` 监听立即感知。
 
+### 后台保活（无障碍服务）
+
+切到其他 App 时，Android 可能因内存压力 / 厂商后台清理杀掉进程，导致已建立的 SSH 连接断开。应用内置一个**空实现的无障碍服务**（不读取任何屏幕内容），用于提升进程优先级、避免切后台被杀，从而保持连接不断。
+
+- **可选开启**：首次进入首页若检测到未开启，会弹一次提示（「稍后」/「去开启」）；不开启不影响正常使用，只是没有后台保活。
+- **开启路径**：设置 → 无障碍 → 更多/已下载的应用 → 主板控制台 → 打开。
+- **只提示一次**：用 SharedPreferences 记录「已提示」，此后不再打扰。
+- 无障碍列表里该条目显示为「主板控制台」（service label 与 app 名一致）。
+
+> 无障碍服务解决「进程被杀」，不解决「网络中断」——网络波动由上文 keepalive 兜底，两者互补。
+
 ---
 
 ## 技术栈
@@ -149,11 +160,13 @@ lib/
 ├── tunnel.dart             # 本地端口转发引擎（SSH -L 实现 + 心跳探测）
 ├── tunnel_sheet.dart       # 隧道配置弹层（目标IP/端口/本地端口 + 网址展示）
 ├── commands.dart           # 预设指令定义（ec20 查询/激活）
-└── network_binding.dart    # Android 网络绑定/解绑 + 序列号持久化（MethodChannel）
+├── network_binding.dart    # Android 网络绑定/解绑 + 序列号持久化（MethodChannel）
+└── accessibility_service.dart  # 无障碍服务检测/跳转/提示 flag（MethodChannel）
 
-android/app/src/main/kotlin/com/example/board_control/MainActivity.kt
-                            # Android 原生侧：bindToWifi / unbindProcessNetwork /
-                            #   saveSerial / getSerial（SharedPreferences）
+android/app/src/main/kotlin/com/example/board_control/
+├── MainActivity.kt         # Android 原生侧：bindToWifi / unbindProcessNetwork /
+│                           #   saveSerial / getSerial / 无障碍检测与跳转（SharedPreferences）
+└── KeepAliveAccessibilityService.kt  # 空实现无障碍服务（后台保活）
 
 vendor/xterm/               # 本地 fork 的 xterm 4.0.0（含软键盘回车 + 滚动对齐修复）
 ```
@@ -225,6 +238,16 @@ dependency_overrides:
 ---
 
 ## 使用说明
+
+### 开启后台保活（可选）
+
+切到其他 App 时保持连接不断，需要开启无障碍服务（首次进入首页会弹一次提示）：
+
+1. 打开应用，首次进入首页会弹出「开启后台运行」提示，点「去开启」；或手动进入。
+2. 手动路径：设置 → 无障碍 → 更多/已下载的应用 → 主板控制台 → 打开。
+3. 开启后连上主板，切到别的 App 再切回来，连接保持不断。
+
+不开启也不影响正常使用，只是没有后台保活。
 
 ### WiFi 直连
 

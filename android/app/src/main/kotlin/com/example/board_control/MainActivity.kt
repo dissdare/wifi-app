@@ -1,11 +1,14 @@
 package com.example.board_control
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -24,6 +27,10 @@ class MainActivity : FlutterActivity() {
                     "unbindProcessNetwork" -> unbindProcessNetwork(result)
                     "saveSerial" -> saveSerial(call, result)
                     "getSerial" -> getSerial(result)
+                    "isAccessibilityServiceEnabled" -> isAccessibilityServiceEnabled(result)
+                    "openAccessibilitySettings" -> openAccessibilitySettings(result)
+                    "getA11yPromptShown" -> getA11yPromptShown(result)
+                    "setA11yPromptShown" -> setA11yPromptShown(result)
                     else -> result.notImplemented()
                 }
             }
@@ -109,5 +116,48 @@ class MainActivity : FlutterActivity() {
         val serial = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             .getString("last_frp_serial", null)
         result.success(serial)
+    }
+
+    /**
+     * 无障碍服务是否已开启。
+     *
+     * 直接读系统设置里已启用的无障碍服务列表（ENABLED_ACCESSIBILITY_SERVICES，
+     * 格式为 "包名/.服务名:..."），判断是否包含本应用的保活服务。无需任何权限。
+     */
+    private fun isAccessibilityServiceEnabled(result: MethodChannel.Result) {
+        val expected = ComponentName(this, KeepAliveAccessibilityService::class.java)
+            .flattenToShortString()
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: ""
+        val enabled = enabledServices
+            .split(':')
+            .any { it.equals(expected, ignoreCase = true) }
+        result.success(enabled)
+    }
+
+    /** 跳转到系统「无障碍」设置页，让用户开启本应用的服务。 */
+    private fun openAccessibilitySettings(result: MethodChannel.Result) {
+        try {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            result.success(true)
+        } catch (e: Exception) {
+            result.success(false)
+        }
+    }
+
+    private fun getA11yPromptShown(result: MethodChannel.Result) {
+        val shown = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .getBoolean("a11y_prompt_shown", false)
+        result.success(shown)
+    }
+
+    private fun setA11yPromptShown(result: MethodChannel.Result) {
+        getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("a11y_prompt_shown", true)
+            .apply()
+        result.success(true)
     }
 }
