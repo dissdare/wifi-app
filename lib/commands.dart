@@ -29,6 +29,10 @@ const List<CommandDef> presetCommands = [
     '查看信号质量',
     r'''echo; systemctl stop app; resp=$(ec20 'AT+CSQ' 2>&1); csq=$(printf '%s\n' "$resp" | grep -oP '\+CSQ:\s*\K[0-9]+' | head -n1); if [[ $resp == *"The serial ports did not open correctly"* ]]; then echo "和ec20通信失败"; elif [[ $resp == *'+CSQ: 99'* ]]; then echo "信号有问题，请排查sim卡问题"; elif [ -n "$csq" ]; then echo "信号质量：$csq"; else echo "未知响应"; fi; systemctl start app; echo''',
   ),
+  CommandDef(
+    '联网检测',
+    r'''echo; ((ping -c5 -W2 -i1 www.baidu.com >/dev/null 2>&1 && echo OK) & (ping -c5 -W2 -i1 8.8.8.8 >/dev/null 2>&1 && echo OK) & wait ) | grep -q OK && echo "联网成功" || echo "联网失败"; echo''',
+  ),
 ];
 
 /// 远程连接（frp）下无预设指令（中断操作已由底部 Ctrl+C 组合键承担）。
